@@ -23,6 +23,7 @@ class FakeMixxx:
         self.rows = rows  # what the open view shows
         self.selected = selected
         self.players = {}
+        self.positions = {}  # deck: playposition
         self.playing = set()
         self.sort = (23, 0)
         self.sort_sticks = True
@@ -35,7 +36,12 @@ class FakeMixxx:
         if op == "hello":
             return {"ok": True, "decks": 4}
         if op == "state":
-            return {"ok": True, "session": self.session, "decks": [], "timeline": None,
+            decks = []
+            for d in range(1, 5):
+                t = self.players.get(f"[Channel{d}]")
+                decks.append({"group": f"[Channel{d}]", "duration": t.duration if t else 0,
+                              "playposition": self.positions.get(d, 0.0)})
+            return {"ok": True, "session": self.session, "decks": decks, "timeline": None,
                     "library": {"sort_column": self.sort[0], "sort_order": self.sort[1]}}
         if op == "move":
             n, delta = len(self.rows), args["delta"]
@@ -209,6 +215,38 @@ def test_runs_lanes_in_seconds_on_the_clock_decks_grid():
     assert (filt["group"], filt["key"]) == ("[QuickEffectRack1_[Channel2]]", "super1")
     assert [p[1] for p in filt["points"]] == [0.0, 0.5]
     assert (stem["group"], stem["key"]) == ("[Channel1_Stem2]", "volume")
+
+
+def test_position_jumps_to_a_bar_of_the_decks_own_track_on_the_clocks_time():
+    m, a = setup(0)
+    a.load(1, CRATE[0].location)  # 126 BPM, 200 s
+    a.load(2, CRATE[6].location)  # 150 BPM, 212 s
+    a.run(Timeline("t", [Lane(deck=2, control="position", clock=1, points=[(8, 16)])]))
+    [lane] = m.timeline["lanes"]
+    assert (lane["group"], lane["key"], lane["kind"]) == ("[Channel2]", "playposition", "set")
+    [[when, where]] = lane["points"]
+    assert when == pytest.approx(0.5 + 8 * 4 * 60 / 126)
+    assert where == pytest.approx((0.5 + 16 * 4 * 60 / 150) / 212)
+    with pytest.raises(AdapterError, match="deck 3 has no track"):
+        a.run(Timeline("t", [Lane(deck=3, control="position", clock=1, points=[(8, 0)])]))
+
+
+def test_sync_turns_quantize_on_with_it():
+    m, a = setup(0)
+    a.load(1, CRATE[0].location)
+    a.run(Timeline("t", [Lane(deck=2, control="sync", clock=1, points=[(0, 1)])]))
+    sync, quantize = m.timeline["lanes"]
+    assert (sync["key"], quantize["key"]) == ("sync_enabled", "quantize")
+    assert sync["points"] == quantize["points"]
+
+
+def test_state_gives_each_loaded_deck_its_bar():
+    m, a = setup(0)
+    a.load(1, CRATE[0].location)  # grid: 126 BPM, first beat at 0.5 s
+    m.positions[1] = (0.5 + 10 * 4 * 60 / 126) / 200
+    s = a.state()
+    assert s["decks"][0]["bar"] == pytest.approx(10)
+    assert "bar" not in s["decks"][1]
 
 
 def test_eq_ramps_follow_the_db_curve_and_kill_at_zero_gain():

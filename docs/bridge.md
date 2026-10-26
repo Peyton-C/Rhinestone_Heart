@@ -44,7 +44,9 @@ From Mixxx, a reply goes as Control Change messages, never SysEx. Mixxx 2.6 on m
 | `B2` | The last character, when there is an odd one |
 | `B3` | End: the reply's number again and the sum of its characters, 7 bits |
 
-The server drops a reply that is cut short or whose sum does not match. If Mixxx's output ever jams, as it will after any SysEx sent from a script, only restarting Mixxx clears it.
+The server drops a reply that is cut short or whose sum does not match. The IAC bus loses a short message now and then under load, about one reply in thirty while `state` was asked four times a second, so the script keeps its last 16 replies and the server asks for one again with `resend` when it has heard nothing for a quarter of a second. The request itself is never sent twice, since a load may already have happened. The script rounds its numbers to keep replies short.
+
+If Mixxx's output ever jams, as it will after SysEx sent from a script, only restarting Mixxx clears it.
 
 ## Operations
 A request is `{"id": n, "op": ..., ...}` and its reply carries the same id, `ok`, and the script's session, a random id picked when the mapping starts. The script also sends events unasked: `hello` when it starts, so a running server learns Mixxx restarted, and `timeline_done` and `clock_changed` as a timeline plays.
@@ -59,8 +61,9 @@ A request is `{"id": n, "op": ..., ...}` and its reply carries the same id, `ok`
 | `load` | Loads the selected row onto `group`, a deck or `[PreviewDeck1]`, and answers once it has loaded or `timeout_ms` has passed |
 | `run` | Plays a timeline, replacing any playing |
 | `stop` | Ends the timeline playing. The decks keep playing |
+| `resend` | Sends the reply to request `of` again, without doing it again |
 
-`load` refuses a deck that is playing. It empties the deck first, so a load that fails, as a missing file's does, reads as `loaded: false` and not as the old track. Mixxx reloads the last ejected track when an empty deck is ejected, and the one before when a deck is ejected twice within half a second, so the script ejects only a deck with a track on it and keeps ejects on one deck 600 ms apart.
+`load` refuses a deck that is playing. It empties the deck first, so a load that fails, as a missing file's does, reads as `loaded: false` and not as the old track. Mixxx reloads the last ejected track when an empty deck is ejected, and the one before when a deck is ejected twice within half a second, so the script ejects only a deck with a track on it and keeps ejects on one deck 600 ms apart. Once a track has loaded, Mixxx still seeks it to its cue point a moment later, so `load` answers 250 ms after the track is in, and a position set after it holds.
 
 ## Loading by row
 Mixxx gives a script no way to name a track: it can only move the library's selection and load what is selected. Every song therefore has a fixed row in the crate playlist, sorted by `#` ascending, and the adapter keeps track of which row is selected. When the view is sorted otherwise, the adapter sorts it back before loading. Moves wrap at both ends, so it moves by the difference between rows, whichever way round is shorter.
@@ -79,6 +82,15 @@ A timeline is a set of lanes, each setting one control from the play position of
 | `kind` | `ramp` sets straight lines between points from the first point on, and `set` sets each point's value once as the clock passes it |
 | `points` | `[seconds, value]` pairs in time order |
 
-The timeline carries the length of the track each clock deck had when it was written. A clock deck whose track changes stops its lanes and sends `clock_changed`.
+Lanes that set a clock deck's own position run first in each update, and the rest are judged by where that jump left the deck. The timeline carries the length of the track each clock deck had when it was written. A clock deck whose track changes stops its lanes and sends `clock_changed`.
 
-The adapter writes these from neutral lanes, whose points are bars on the clock deck's track and whose values are in the units `CONTROLS` lists. Bars come from Mixxx's beatgrid: bar 0 starts at the grid's first beat, and bars count in fours. EQ is ramped in dB, so its lanes are split into short straight pieces of gain. The script is updated on each change of play position, once per audio buffer, so a point lands within a buffer or two of its time.
+The adapter writes these from neutral lanes, whose points are bars on the clock deck's track and whose values are in the units `CONTROLS` lists. Beats come from Mixxx's beatgrid, but Mixxx knows nothing of bars, and its grid's first beat is not always a downbeat: Flashing Lights' starts three beats before one. So the server works out which beat of the grid is the downbeat, and counts bars in fours from it, before as well as after. Mixxx's grids are not changed.
+
+| Source | Used when |
+| --- | --- |
+| Section starts from the shared analysis, the beat of the bar most of them fall on | At least 3 fall on a beat, and 60% of those on one beat of the bar |
+| Where the drum stem first comes in, from the same analysis | The sections do not settle it and the drums enter on a beat. Drums can come in on a fill a beat early, as Rhinestone Heart's do, so they come second |
+| Where Mixxx's analyzer found the sound starts | There is no shared analysis for the track. Take It Off's sound starts on a pickup a beat before its first full bar, so this is a last resort |
+| Mixxx's first beat | Nothing else |
+
+`uv run rhinestone --metadata crate.json grids` lists each crate track's downbeat and what set it, and flags a grid whose tempo disagrees with the analysis: one off by a fraction of a BPM drifts against the music over the song, and one at half or double the tempo has bars twice or half as long. The export is `pink diamond --export-metadata crate.json`, named with `--metadata` or `RHINESTONE_METADATA`, and songs are matched to Mixxx's tracks by path. EQ is ramped in dB, so its lanes are split into short straight pieces of gain. `position` jumps a deck to a bar of its own track, and a lane turning `sync` on turns quantize on too, since Mixxx's sync matches phase only with it. The script is updated on each change of play position, once per audio buffer, so a point lands within a buffer or two of its time.

@@ -23,11 +23,12 @@ CONTROLS = {
     "stem4": "the stem slot's volume, 0 to 1",
     "play": "1 plays, 0 pauses",
     "sync": "1 locks the deck's tempo and phase to the others, 0 frees it",
+    "position": "jumps the deck to a bar of its own track",
 }
 
 # Controls whose points are set as the clock passes them, where the rest ramp in a
 # straight line from point to point in the units above
-SET_CONTROLS = frozenset({"play", "sync"})
+SET_CONTROLS = frozenset({"play", "sync", "position"})
 
 
 @dataclass
@@ -86,4 +87,5 @@ class Adapter(ABC):
 
     @abstractmethod
     def state(self) -> dict:
-        """What each deck holds and is doing, with an id that changes when the app restarts."""
+        """What each deck holds and is doing, with the bar each loaded deck is at on its
+        own track, and an id that changes when the app restarts."""

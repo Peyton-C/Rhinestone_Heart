@@ -51,6 +51,39 @@ test("replies are ASCII whatever they carry", () => {
     assert.match(m.reply(1).error, /dance é/);
 });
 
+test("resend sends a kept reply again without doing its request again", () => {
+    const m = started();
+    m.request({id: 7, op: "move", delta: 2});
+    m.request({id: 8, op: "resend", of: 7});
+    const replies = m.messages().filter((x) => x.id === 7);
+    assert.equal(replies.length, 2);
+    assert.deepEqual(replies[0], replies[1]);
+    assert.equal(m.sets.filter((s) => s[1] === "SelectTrackKnob").length, 1);
+    m.request({id: 9, op: "resend", of: 99});
+    assert.match(m.reply(9).error, /no reply kept for 99/);
+});
+
+test("keeps only the latest replies", () => {
+    const m = started();
+    for (let i = 1; i <= 20; i++) {
+        m.request({id: i, op: "hello"});
+    }
+    m.request({id: 100, op: "resend", of: 1});
+    assert.equal(m.reply(100).ok, false);
+    m.request({id: 101, op: "resend", of: 20});
+    assert.equal(m.messages().filter((x) => x.id === 20).length, 2);
+});
+
+test("state rounds its numbers for the wire", () => {
+    const m = started();
+    m.put("[Channel1]", "playposition", 0.123456789123);
+    m.put("[Channel1]", "bpm", 125.999999999);
+    m.request({id: 1, op: "state"});
+    const d = m.reply(1).decks[0];
+    assert.equal(d.playposition, 0.12345679);
+    assert.equal(d.bpm, 126);
+});
+
 test("move moves the selection, and a zero move sets nothing", () => {
     const m = started();
     m.request({id: 1, op: "move", delta: -3});
@@ -65,6 +98,8 @@ test("loads onto an empty deck without ejecting, and waits for the track", () =>
     m.request({id: 1, op: "load", group: "[Channel1]"});
     assert.equal(m.reply(1), undefined);
     m.advance(LOAD_MS + 50);
+    assert.equal(m.reply(1), undefined, "waits for Mixxx's seek to the cue point");
+    m.advance(m.B.SETTLE_MS);
     assert.deepEqual(m.reply(1), {id: 1, session: m.B.session, ok: true, loaded: true,
         duration: 117.8, file_bpm: 87});
     assert.ok(!m.sets.some((s) => s[1] === "eject"));
@@ -177,6 +212,21 @@ test("a timeline starting mid-way catches up at once", () => {
     ]}});
     assert.equal(m.get("[Channel2]", "sync_enabled"), 1);
     assert.equal(m.get("[Channel1]", "volume"), 0.5);
+});
+
+test("a jump of the clock deck is made before other lanes are judged", () => {
+    const m = started();
+    deckAt(m, "[Channel1]", 46);
+    m.request({id: 1, op: "run", timeline: {id: "t", lanes: [
+        {group: "[Channel2]", key: "play", clock: "[Channel1]", kind: "set", points: [[30, 1]]},
+        {group: "[Channel1]", key: "playposition", clock: "[Channel1]", kind: "set", points: [[-1e9, 0.1]]},
+        {group: "[Channel1]", key: "volume", clock: "[Channel1]", kind: "ramp", points: [[10, 0], [30, 1]]},
+    ]}});
+    assert.equal(m.get("[Channel1]", "playposition"), 0.1);
+    assert.equal(m.get("[Channel2]", "play"), 0, "bar 30 s is still ahead after the jump to 20 s");
+    assert.ok(Math.abs(m.get("[Channel1]", "volume") - 0.5) < 1e-9);
+    deckAt(m, "[Channel1]", 31);
+    assert.equal(m.get("[Channel2]", "play"), 1);
 });
 
 test("a track changed under a clock deck stops its lanes and says so", () => {

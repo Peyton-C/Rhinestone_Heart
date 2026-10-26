@@ -216,12 +216,26 @@ class MixxxAdapter(Adapter):
                 raise AdapterError(f"{where}: Mixxx has no beatgrid for {track.location}")
             if not lane.points:
                 raise AdapterError(f"{where}: no points")
-            group, key, convert = control(lane.deck, lane.control)
+            if lane.control == "position":
+                # A bar of the deck's own track, which Mixxx takes as a fraction of it
+                if lane.deck not in self._loaded or self._loaded[lane.deck][0].grid is None:
+                    raise AdapterError(f"{where}: deck {lane.deck} has no track with a beatgrid "
+                                       "loaded by the server")
+                own, own_length = self._loaded[lane.deck]
+                group, key = f"[Channel{lane.deck}]", "playposition"
+                convert = lambda bar, g=own.grid, n=own_length: g.bar_time(bar) / n
+            else:
+                group, key, convert = control(lane.deck, lane.control)
             points = _points(lane, convert, track.grid.bar_time)
-            clocks[f"[Channel{lane.clock}]"] = length
-            lanes.append({"group": group, "key": key, "clock": f"[Channel{lane.clock}]",
-                          "kind": "set" if lane.control in SET_CONTROLS else "ramp",
+            clock = f"[Channel{lane.clock}]"
+            clocks[clock] = length
+            kind = "set" if lane.control in SET_CONTROLS else "ramp"
+            lanes.append({"group": group, "key": key, "clock": clock, "kind": kind,
                           "points": points})
+            if lane.control == "sync":
+                # Mixxx's sync matches tempo, and phase only with quantize on
+                lanes.append({"group": group, "key": "quantize", "clock": clock, "kind": kind,
+                              "points": points})
         self._call("run", timeline={"id": timeline.id, "clocks": clocks, "lanes": lanes})
 
     def replace(self, timeline: Timeline, from_bar: float) -> None:
@@ -235,7 +249,13 @@ class MixxxAdapter(Adapter):
     def state(self) -> dict:
         self._check_restart()
         s = self._call("state")
-        return {"session": s["session"], "decks": s["decks"], "timeline": s["timeline"],
+        decks = s["decks"]
+        for d, (track, length) in self._loaded.items():
+            deck = decks[d - 1] if d <= len(decks) else None
+            if deck is None or track.grid is None or abs(deck["duration"] - length) > DURATION_TOLERANCE:
+                continue
+            deck["bar"] = track.grid.bar_at(deck["playposition"] * deck["duration"])
+        return {"session": s["session"], "decks": decks, "timeline": s["timeline"],
                 "loaded": {d: t.location for d, (t, _) in self._loaded.items()}}
 
 

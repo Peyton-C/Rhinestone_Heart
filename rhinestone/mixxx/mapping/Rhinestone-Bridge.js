@@ -30,6 +30,17 @@ RhinestoneBridge.EJECT_GAP_MS = 600;
 
 RhinestoneBridge.POLL_MS = 20;
 
+// After a track counts as loaded, Mixxx still seeks it to its cue point, a moment later
+// on the audio thread. A load answers only after this, so a position set right after
+// it is not overwritten: Take It Off's cue sits three beats in, past its count-in, and a
+// jump to its bar 0 sent on the heels of the load was undone
+RhinestoneBridge.SETTLE_MS = 250;
+
+// Replies kept to send again. The IAC bus loses a short message now and then under load,
+// which loses its whole reply, so the server asks for it again instead of repeating a
+// request that may have done something, such as a load
+RhinestoneBridge.KEEP = 16;
+
 RhinestoneBridge.now = function() {
     return Date.now();
 };
@@ -41,6 +52,8 @@ RhinestoneBridge.init = function() {
     B.partial = {};
     B.lastEject = {};
     B.timeline = null;
+    B.kept = {};
+    B.keptOrder = [];
     // Told unasked, so a server that is already running learns Mixxx restarted
     B.send({event: "hello", session: B.session, version: B.VERSION});
 };
@@ -140,11 +153,31 @@ RhinestoneBridge.reply = function(message, fields) {
     for (var k in fields) {
         out[k] = fields[k];
     }
-    RhinestoneBridge.send(out);
+    RhinestoneBridge.answer(out);
 };
 
 RhinestoneBridge.fail = function(message, error) {
-    RhinestoneBridge.send({id: message.id, session: RhinestoneBridge.session, ok: false, error: error});
+    RhinestoneBridge.answer({id: message.id, session: RhinestoneBridge.session, ok: false, error: error});
+};
+
+RhinestoneBridge.answer = function(out) {
+    var B = RhinestoneBridge;
+    if (out.id !== null && out.id !== undefined) {
+        if (!(out.id in B.kept)) {
+            B.keptOrder.push(out.id);
+        }
+        B.kept[out.id] = out;
+        while (B.keptOrder.length > B.KEEP) {
+            delete B.kept[B.keptOrder.shift()];
+        }
+    }
+    B.send(out);
+};
+
+// Rounds for the wire, where a float's 17 digits cost 9 short messages
+RhinestoneBridge.round = function(x, places) {
+    var f = Math.pow(10, places);
+    return Math.round(x * f) / f;
 };
 
 RhinestoneBridge.after = function(ms, fn) {
@@ -176,13 +209,15 @@ RhinestoneBridge.isPlayer = function(group) {
 };
 
 RhinestoneBridge.player = function(group) {
-    var v = function(key) {
-        return engine.getValue(group, key);
+    var v = function(key, places) {
+        var x = engine.getValue(group, key);
+        return places === undefined ? x : RhinestoneBridge.round(x, places);
     };
-    var out = {group: group, track_loaded: v("track_loaded"), duration: v("duration"),
-        file_bpm: v("file_bpm"), play: v("play"), playposition: v("playposition")};
+    // A play position to 8 places is a twentieth of a millisecond in a ten-minute track
+    var out = {group: group, track_loaded: v("track_loaded"), duration: v("duration", 4),
+        file_bpm: v("file_bpm", 4), play: v("play"), playposition: v("playposition", 8)};
     if (RhinestoneBridge.isDeck(group)) {
-        out.bpm = v("bpm");
+        out.bpm = v("bpm", 4);
         out.sync_enabled = v("sync_enabled");
         out.stem_count = v("stem_count");
     }
@@ -190,6 +225,16 @@ RhinestoneBridge.player = function(group) {
 };
 
 RhinestoneBridge.ops = {};
+
+// Sends a kept reply again, under its own id, without doing its request again
+RhinestoneBridge.ops.resend = function(m) {
+    var r = RhinestoneBridge.kept[m.of];
+    if (r) {
+        RhinestoneBridge.send(r);
+    } else {
+        RhinestoneBridge.fail(m, "no reply kept for " + m.of);
+    }
+};
 
 RhinestoneBridge.ops.hello = function(m) {
     RhinestoneBridge.reply(m, {version: RhinestoneBridge.VERSION,
@@ -283,8 +328,10 @@ RhinestoneBridge.ops.load = function(m) {
         B.waitFor(function() {
             return engine.getValue(g, "track_loaded") && engine.getValue(g, "duration") > 0;
         }, timeout, function(loaded) {
-            var p = B.player(g);
-            B.reply(m, {loaded: loaded, duration: p.duration, file_bpm: p.file_bpm});
+            B.after(loaded ? B.SETTLE_MS : 0, function() {
+                var p = B.player(g);
+                B.reply(m, {loaded: loaded, duration: p.duration, file_bpm: p.file_bpm});
+            });
         });
     };
     if (!engine.getValue(g, "track_loaded")) {
@@ -380,9 +427,21 @@ RhinestoneBridge.clearTimeline = function() {
 RhinestoneBridge.tick = function(clock) {
     var B = RhinestoneBridge;
     var t = B.timeline;
-    if (!t) {
+    if (!t || B.ticking) {
+        // A jump below moves the clock, which can call back in here; the tick under
+        // way reads the clock again after its jumps anyway
         return;
     }
+    B.ticking = true;
+    try {
+        B.tickLanes(t, clock);
+    } finally {
+        B.ticking = false;
+    }
+};
+
+RhinestoneBridge.tickLanes = function(t, clock) {
+    var B = RhinestoneBridge;
     var duration = engine.getValue(clock, "duration");
     var expected = t.clocks[clock];
     if (expected !== undefined && Math.abs(duration - expected) > B.CLOCK_TOLERANCE) {
@@ -393,16 +452,25 @@ RhinestoneBridge.tick = function(clock) {
         }
         return;
     }
-    var now = engine.getValue(clock, "playposition") * duration;
-    var left = 0;
-    t.lanes.forEach(function(lane) {
-        if (lane.clock === clock && !lane.done) {
-            B.advance(lane, now);
-        }
-        if (!lane.done) {
-            left++;
-        }
+    var now = function() {
+        return engine.getValue(clock, "playposition") * duration;
+    };
+    // Lanes that move the clock deck itself go first, and the rest read the clock after
+    // them, so a jump to a bar is not followed by lanes judged by where the deck was
+    var jumps = function(lane) {
+        return lane.group === clock && lane.key === "playposition";
+    };
+    [true, false].forEach(function(first) {
+        var at = now();
+        t.lanes.forEach(function(lane) {
+            if (lane.clock === clock && !lane.done && jumps(lane) === first) {
+                B.advance(lane, at);
+            }
+        });
     });
+    var left = t.lanes.filter(function(lane) {
+        return !lane.done;
+    }).length;
     if (!left) {
         B.clearTimeline();
         B.send({event: "timeline_done", session: B.session, timeline: t.id});
