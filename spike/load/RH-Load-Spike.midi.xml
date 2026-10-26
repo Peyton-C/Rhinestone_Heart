@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MixxxControllerPreset mixxxVersion="2.6" schemaVersion="1">
+    <info>
+        <name>RH Load Spike</name>
+        <author>Peyton</author>
+        <description>Throwaway test: can a controller script load chosen rows of a playlist onto decks without help. Runs on its own once enabled, and logs each step.</description>
+    </info>
+    <controller id="RHLoadSpike">
+        <scriptfiles>
+            <file functionprefix="RHLoadSpike" filename="RH-Load-Spike.js"/>
+        </scriptfiles>
+        <controls/>
+        <outputs/>
+    </controller>
+</MixxxControllerPreset>

@@ -221,3 +221,5 @@ __marimo__/
 
 # Personal Notes folder
 notes/
+
+.DS_Store

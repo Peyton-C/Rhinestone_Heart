@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MixxxControllerPreset mixxxVersion="2.6" schemaVersion="1">
+    <info>
+        <name>Rhinestone Bridge</name>
+        <author>Peyton</author>
+        <description>Rhinestone Heart's bridge. Enable it on the IAC bus the server uses. It takes SysEx from the server and has no controls of its own.</description>
+    </info>
+    <controller id="RhinestoneBridge">
+        <scriptfiles>
+            <file functionprefix="RhinestoneBridge" filename="Rhinestone-Bridge.js"/>
+        </scriptfiles>
+        <controls>
+            <!-- Mixxx hands SysEx to the script only through an input mapping for 0xF0
+                 (MidiController::receive), and then calls incomingData -->
+            <control>
+                <group>[Master]</group>
+                <key>RhinestoneBridge.incomingData</key>
+                <description>Requests from the server</description>
+                <status>0xF0</status>
+                <options>
+                    <Script-Binding/>
+                </options>
+            </control>
+        </controls>
+        <outputs/>
+    </controller>
+</MixxxControllerPreset>
